@@ -57,8 +57,18 @@ OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY")
 OPENAI_MODEL_DEFAULT = st.secrets.get("OPENAI_MODEL", "gpt-4o-mini")  # можно переопределить в сайдбаре
 
 TELEGRAM_CONF = st.secrets.get("telegram", {})
-TG_TOKEN = TELEGRAM_CONF.get("bot_token") or st.secrets.get("TELEGRAM_BOT_TOKEN")
-TG_DEFAULT_CHAT = TELEGRAM_CONF.get("default_chat_id") or st.secrets.get("TELEGRAM_CHAT_ID")
+TG_TOKEN = (
+    TELEGRAM_CONF.get("bot_token")
+    or st.secrets.get("TELEGRAM_BOT_TOKEN")
+    or st.secrets.get("BOT_TOKEN")
+)
+TG_DEFAULT_CHAT = (
+    TELEGRAM_CONF.get("default_chat_id")
+    or TELEGRAM_CONF.get("chat_id")
+    or st.secrets.get("TELEGRAM_CHAT_ID")
+    or st.secrets.get("TELEGRAM_DEFAULT_CHAT_ID")
+    or st.secrets.get("CHAT_ID")
+)
 DEPT_MAP: Dict[str, str] = TELEGRAM_CONF.get("departments", {})
 
 if "_init" not in st.session_state:
@@ -149,11 +159,13 @@ def chunk_for_tg(text: str, limit: int = 4000) -> List[str]:
 
 def send_to_telegram(text: str, chat_id: str | None = None) -> List[requests.Response]:
     if not TG_TOKEN:
-        st.error("Не найден telegram.bot_token в secrets.")
+        st.error("Не найден telegram.bot_token / TELEGRAM_BOT_TOKEN / BOT_TOKEN в secrets.")
         return []
     target_chat = chat_id or TG_DEFAULT_CHAT
     if not target_chat:
-        st.error("Не задан chat_id для Telegram (telegram.default_chat_id или TELEGRAM_CHAT_ID).")
+        st.error(
+            "Не задан chat_id для Telegram (поддерживаются ключи: telegram.default_chat_id, telegram.chat_id, TELEGRAM_CHAT_ID, TELEGRAM_DEFAULT_CHAT_ID, CHAT_ID)."
+        )
         return []
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
     results = []
@@ -161,8 +173,6 @@ def send_to_telegram(text: str, chat_id: str | None = None) -> List[requests.Res
         payload = {
             "chat_id": target_chat,
             "text": chunk,
-            # Без parse_mode, чтобы избежать экранирования. Хотите форматирование — смените на 'HTML'.
-            # "parse_mode": "HTML",
             "disable_web_page_preview": True,
         }
         r = requests.post(url, data=payload, timeout=30)
@@ -262,7 +272,11 @@ def parse_json_questions(text_block: str) -> List[str]:
 def generate_questions(initial_text: str) -> List[str]:
     """Стойкая генерация вопросов: список -> JSON -> фолбэк."""
     # Попытка 1 — обычный формат (нумерованный список)
-    user_content_1 = "Текст:\n\n" + str(initial_text) + "\n\n" + QUESTIONS_INSTRUCTION
+    user_content_1 = "Текст:
+
+" + str(initial_text) + "
+
+" + QUESTIONS_INSTRUCTION
     msg1 = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": user_content_1},
@@ -278,7 +292,9 @@ def generate_questions(initial_text: str) -> List[str]:
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": (
             "Сформируй 7 уточняющих вопросов в JSON без лишнего текста: "
-            "{\\\"questions\\\":[\\\"вопрос1\\\",\\\"вопрос2\\\",...]} по следующему тексту:\n\n" + str(initial_text)
+            "{\\"questions\\":[\\"вопрос1\\",\\"вопрос2\\",...]} по следующему тексту:
+
+" + str(initial_text)
         )},
     ]
     raw2 = call_chat_completion(msg2, temperature=TEMPERATURE)
@@ -299,6 +315,77 @@ def generate_questions(initial_text: str) -> List[str]:
         "Какие требования к логированию и метрикам качества?",
         "Какие юридические/безопасностные требования?",
     ]
+
+def build_fallback_tz(initial_text: str, questions: List[str], answers: Dict[int, str]) -> str:
+    md = []
+    md.append("# Название
+")
+    md.append("Черновик ТЗ (автосборка)
+
+")
+    md.append("## Исходный ввод
+")
+    md.append(str(initial_text).strip() + "
+
+")
+    md.append("## Уточнения
+")
+    for i in range(len(questions)):
+        q = str(questions[i])
+        ans = str(answers.get(i, "")).strip()
+        if not ans:
+            ans = "—"
+        md.append("- " + str(i+1) + ". " + q + "
+  Ответ: " + ans + "
+")
+    md.append("
+## Цель
+—
+
+")
+    md.append("## Контекст и ограничения
+—
+
+")
+    md.append("## Пользовательские сценарии
+- —
+- —
+- —
+
+")
+    md.append("## Входные данные
+- —
+
+")
+    md.append("## Выход/результат
+- —
+
+")
+    md.append("## Критерии качества и приёмки
+- —
+
+")
+    md.append("## Ограничения генерации
+- —
+
+")
+    md.append("## Технические детали промпта
+- Системное сообщение — заполнить
+- Параметры: temperature/top_p — уточнить
+
+")
+    md.append("## Телеметрия и логирование
+- —
+
+")
+    md.append("## Риски и допущения
+- —
+
+")
+    md.append("## Чек-лист готовности
+- —
+")
+    return "".join(md)
 
 # ---------------------------- Stage: Input ----------------------------
 if st.session_state.stage == "input":
@@ -355,16 +442,34 @@ elif st.session_state.stage == "questions":
             if st.button("Сформировать ТЗ", type="primary", use_container_width=True):
                 with st.spinner("Собираем структурное ТЗ…"):
                     # Собираем блок с ответами
-                    answers_block = "\n\n".join([f"{i+1}. {st.session_state.questions[i]}\nОтвет: {st.session_state.answers.get(i, '').strip()}" for i in range(len(st.session_state.questions))])
+                    answers_block = "
+
+".join([f"{i+1}. {st.session_state.questions[i]}
+Ответ: {st.session_state.answers.get(i, '').strip()}" for i in range(len(st.session_state.questions))])
                     user_content_tz = (
-                        "Изначальный текст (идея/черновик):\n\n" + str(st.session_state.initial_text) + "\n\n"
-                        + "Ответы на уточняющие вопросы:\n\n" + answers_block + "\n\n" + TZ_INSTRUCTION
+                        "Изначальный текст (идея/черновик):
+
+" + str(st.session_state.initial_text) + "
+
+"
+                        + "Ответы на уточняющие вопросы:
+
+" + answers_block + "
+
+" + TZ_INSTRUCTION
                     )
                     msg = [
                         {"role": "system", "content": SYSTEM_PROMPT},
                         {"role": "user", "content": user_content_tz},
                     ]
                     tz_md = call_chat_completion(msg, temperature=TEMPERATURE)
+                    if not tz_md or not tz_md.strip():
+                        tz_md = build_fallback_tz(
+                            st.session_state.initial_text,
+                            st.session_state.questions,
+                            st.session_state.answers,
+                        )
+                        st.warning("Модель вернула пустой ответ — собрали базовый черновик ТЗ автоматически. Отредактируйте при необходимости.")
                     st.session_state.tz_markdown = tz_md
                     st.session_state.stage = "draft"
                     st.rerun()
