@@ -1,34 +1,5 @@
 # -*- coding: utf-8 -*-
-"""
-Streamlit: Генератор ТЗ из идей + отправка в Telegram
 
-Особенности:
-- Пользователь вводит Идею или Черновик ТЗ → модель задаёт уточняющие вопросы → формируется ТЗ.
-- Предпросмотр ТЗ, ручное редактирование, выбор отдела и постановщика.
-- Отправка результата в Telegram ботом (Bot API).
-- Ключи и настройки берём из st.secrets (см. подсказки ниже).
-
-Требуемые зависимости: streamlit, openai>=1.0.0, requests
-Запуск: streamlit run streamlit_tz_to_telegram_app.py
-
-Пример структуры .streamlit/secrets.toml:
-
-OPENAI_API_KEY = "sk-..."
-OPENAI_MODEL = "gpt-4o-mini"  # опционально, будет дефолт если не задано
-
-[telegram]
-bot_token = "123456:ABCDEF..."
-# Если хотите маршрутизацию по отделам — укажите ID чатов ниже (channel/group/supergroup):
-# Получить chat_id можно добавив бота в чат и вызвав https://api.telegram.org/bot<token>/getUpdates
-# либо любой известный вам ID канала/группы.
-default_chat_id = "-1001234567890"
-
-  [telegram.departments]
-  "Маркетинг" = "-1001111111111"
-  "Продажи"   = "-1002222222222"
-  "R&D"       = "-1003333333333"
-
-"""
 
 from __future__ import annotations
 import os
@@ -49,7 +20,7 @@ except Exception as e:  # pragma: no cover
 # ---------------------------- UI CONFIG ----------------------------
 st.set_page_config(page_title="Генератор ТЗ → Telegram", page_icon="📝", layout="centered")
 
-st.title("📝 Генератор ТЗ для промпт‑инженера → Telegram")
+st.title("📝 Генератор ТЗ для промпт‑инженера")
 st.caption("Вставьте идею или черновик ТЗ, ответьте на уточняющие вопросы, утвердите и отправьте в нужный отдел в Telegram.")
 
 # ---------------------------- Secrets / Settings ----------------------------
@@ -72,16 +43,9 @@ if "_init" not in st.session_state:
     st.session_state.selected_dept = None
     st.session_state.requester = ""
 
-# ---------------------------- Sidebar ----------------------------
-st.sidebar.header("Настройки")
-model_name = st.sidebar.text_input("Модель OpenAI", value=OPENAI_MODEL_DEFAULT, help="Можно указать любую поддерживаемую модель, например gpt-4o-mini.")
-stream_temperature = st.sidebar.slider("Температура", 0.0, 1.0, 0.2, 0.1)
-
-if st.sidebar.button("Очистить сессию", type="primary"):
-    for k in list(st.session_state.keys()):
-        if not k.startswith("_"):
-            del st.session_state[k]
-    st.rerun()
+# ---------------------------- Config (без сайдбара) ----------------------------
+model_name = OPENAI_MODEL_DEFAULT
+TEMPERATURE = 0.2
 
 # ---------------------------- Guards ----------------------------
 if not OPENAI_API_KEY:
@@ -281,7 +245,7 @@ if st.session_state.stage == "input":
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": f"Текст:\n\n{st.session_state.initial_text}\n\n{QUESTIONS_INSTRUCTION}"},
                 ]
-                raw = call_chat_completion(msg, temperature=stream_temperature)
+                raw = call_chat_completion(msg, temperature=TEMPERATURE)
                 st.session_state.questions = parse_numbered_questions(raw)
                 st.session_state.answers = {i: "" for i in range(len(st.session_state.questions))}
                 st.session_state.stage = "questions"
@@ -311,7 +275,7 @@ elif st.session_state.stage == "questions":
                             f"Ответы на уточняющие вопросы:\n\n{answers_block}\n\n{TZ_INSTRUCTION}"
                         )},
                     ]
-                    tz_md = call_chat_completion(msg, temperature=stream_temperature)
+                    tz_md = call_chat_completion(msg, temperature=TEMPERATURE)
                     st.session_state.tz_markdown = tz_md
                     st.session_state.stage = "draft"
                     st.rerun()
@@ -360,14 +324,4 @@ elif st.session_state.stage == "draft":
             st.session_state.stage = "questions"
             st.rerun()
 
-# ---------------------------- Footer ----------------------------
-st.markdown(
-    """
----
-**Подсказки по настройке**
-- Убедитесь, что `.streamlit/secrets.toml` содержит `OPENAI_API_KEY` и блок `[telegram]` с `bot_token` и хотя бы `default_chat_id`.
-- Для маршрутизации по отделам используйте таблицу `[telegram.departments]` (ключ — название, значение — chat_id), как в комментарии в начале файла.
-- Лимит Telegram на сообщение ~4096 символов, поэтому текст автоматически делится на части при отправке.
-- Поле *Модель OpenAI* можно менять в сайдбаре.
-    """
-)
+
