@@ -260,14 +260,16 @@ def parse_json_questions(text_block: str) -> List[str]:
 
 
 def generate_questions(initial_text: str) -> List[str]:
+    """Стойкая генерация вопросов: список -> JSON -> фолбэк."""
     # Попытка 1 — обычный формат (нумерованный список)
+    user_content_1 = "Текст:
+
+{}
+
+{}".format(initial_text, QUESTIONS_INSTRUCTION)
     msg1 = [
         {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": f"Текст:
-
-{initial_text}
-
-{QUESTIONS_INSTRUCTION}"},
+        {"role": "user", "content": user_content_1},
     ]
     raw1 = call_chat_completion(msg1, temperature=TEMPERATURE)
     if raw1:
@@ -363,20 +365,19 @@ elif st.session_state.stage == "questions":
 
 ".join([f"{i+1}. {st.session_state.questions[i]}
 Ответ: {st.session_state.answers.get(i, '').strip()}" for i in range(len(st.session_state.questions))])
-                    msg = [
-                        {"role": "system", "content": SYSTEM_PROMPT},
-                        {"role": "user", "content": (
-                            f"Изначальный текст (идея/черновик):
+                    user_content_tz = ("Изначальный текст (идея/черновик):
 
-{st.session_state.initial_text}
+{}
 
 "
-                            f"Ответы на уточняющие вопросы:
+                                        "Ответы на уточняющие вопросы:
 
-{answers_block}
+{}
 
-{TZ_INSTRUCTION}"
-                        )},
+{}" ).format(st.session_state.initial_text, answers_block, TZ_INSTRUCTION)
+                    msg = [
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": user_content_tz},
                     ]
                     tz_md = call_chat_completion(msg, temperature=TEMPERATURE)
                     st.session_state.tz_markdown = tz_md
