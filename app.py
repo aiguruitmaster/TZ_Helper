@@ -8,24 +8,24 @@ Streamlit: Генератор ТЗ из идей + отправка в Telegram
 
 Секреты (.streamlit/secrets.toml) — поддерживаются оба варианта:
 
-# ВАРИАНТ 1 (как у вас, в секции [telegram]):
+# ВАРИАНТ 1 (в корне):
+OPENAI_API_KEY      = "sk-..."
+OPENAI_MODEL        = "gpt-4o-mini"
+TELEGRAM_BOT_TOKEN  = "8427...:AAG..."
+TELEGRAM_CHAT_ID    = "489408957"
+
+# ВАРИАНТ 2 (в секции [telegram]; как на вашем скриншоте):
 [telegram]
-TELEGRAM_BOT_TOKEN = "8427...:AAG..."
-TELEGRAM_CHAT_ID   = "489408957"
+TELEGRAM_BOT_TOKEN  = "8427...:AAG..."
+TELEGRAM_CHAT_ID    = "489408957"
 
-# ВАРИАНТ 2 (в корне):
-TELEGRAM_BOT_TOKEN = "8427...:AAG..."
-TELEGRAM_CHAT_ID   = "489408957"
-
-# Плюс OpenAI:
-OPENAI_API_KEY = "sk-..."
-OPENAI_MODEL   = "gpt-4o-mini"
+# (Также поддерживаются bot_token / default_chat_id / chat_id и др. эквиваленты.)
 """
 
 from __future__ import annotations
 import re
 import json
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 import streamlit as st
 import requests
@@ -42,39 +42,33 @@ st.title("📝 Генератор ТЗ для промпт-инженера → 
 st.caption("Вставьте идею или черновик ТЗ, ответьте на уточняющие вопросы, утвердите и отправьте в нужный отдел в Telegram.")
 
 # ===== Secrets / Settings =====
-OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY")
-OPENAI_MODEL_DEFAULT = st.secrets.get("OPENAI_MODEL", "gpt-4o-mini")
+OPENAI_API_KEY: Optional[str] = st.secrets.get("OPENAI_API_KEY")
+OPENAI_MODEL_DEFAULT: str = st.secrets.get("OPENAI_MODEL", "gpt-4o-mini")
 
 TELEGRAM_CONF = st.secrets.get("telegram", {}) or {}
 
-def _get_secret_any(*names: str) -> str | None:
-    """
-    Достаём значение по ИМЕНИ из:
-    1) корня secrets,
-    2) секции [telegram],
-    3) итерируем по ключам без учёта регистра.
-    """
-    # прямые попадания
+def _get_secret_any(*names: str) -> Optional[str]:
+    """Ищем ключи и в корне secrets, и в секции [telegram], без учёта регистра."""
+    # прямое совпадение
     for n in names:
         v = st.secrets.get(n)
         if v:
-            return v
+            return str(v)
         if isinstance(TELEGRAM_CONF, dict) and TELEGRAM_CONF.get(n):
-            return TELEGRAM_CONF.get(n)
-
+            return str(TELEGRAM_CONF.get(n))
     # case-insensitive
-    lowers_root = {k.lower(): v for k, v in dict(st.secrets).items() if not isinstance(v, dict)}
-    lowers_tg   = {k.lower(): v for k, v in dict(TELEGRAM_CONF).items()}
+    root_lower = {k.lower(): v for k, v in dict(st.secrets).items() if not isinstance(v, dict)}
+    tg_lower   = {k.lower(): v for k, v in dict(TELEGRAM_CONF).items()}
     for n in names:
         ln = n.lower()
-        if ln in lowers_root and lowers_root[ln]:
-            return lowers_root[ln]
-        if ln in lowers_tg and lowers_tg[ln]:
-            return lowers_tg[ln]
+        if ln in root_lower and root_lower[ln]:
+            return str(root_lower[ln])
+        if ln in tg_lower and tg_lower[ln]:
+            return str(tg_lower[ln])
     return None
 
-TG_TOKEN = _get_secret_any("bot_token", "TELEGRAM_BOT_TOKEN", "BOT_TOKEN")
-TG_DEFAULT_CHAT = _get_secret_any("default_chat_id", "chat_id", "TELEGRAM_CHAT_ID", "TELEGRAM_DEFAULT_CHAT_ID", "CHAT_ID")
+TG_TOKEN: Optional[str] = _get_secret_any("TELEGRAM_BOT_TOKEN", "BOT_TOKEN", "bot_token")
+TG_DEFAULT_CHAT: Optional[str] = _get_secret_any("TELEGRAM_CHAT_ID", "TELEGRAM_DEFAULT_CHAT_ID", "CHAT_ID", "default_chat_id", "chat_id")
 DEPT_MAP: Dict[str, str] = TELEGRAM_CONF.get("departments", {}) or {}
 
 # ===== Session =====
@@ -99,13 +93,13 @@ if OpenAI is None:
     st.error("Пакет openai не установлен. Установите:  pip install openai")
 
 # ===== Helpers =====
-def get_openai_client() -> OpenAI:
+@st.cache_resource(show_spinner=False)
+def _openai_client():
     return OpenAI(api_key=OPENAI_API_KEY)
 
 def call_chat_completion(messages: List[Dict[str, Any]], max_tokens: int = 2000, temperature: float = TEMPERATURE) -> str:
     try:
-        client = get_openAI_client_cached()
-        resp = client.chat.completions.create(
+        resp = _openai_client().chat.completions.create(
             model=model_name,
             messages=messages,
             temperature=temperature,
@@ -115,10 +109,6 @@ def call_chat_completion(messages: List[Dict[str, Any]], max_tokens: int = 2000,
     except Exception as e:
         st.error(f"Ошибка OpenAI: {e}")
         return ""
-
-@st.cache_resource(show_spinner=False)
-def get_openAI_client_cached():
-    return get_openai_client()
 
 def chunk_for_tg(text: str, limit: int = 4000) -> List[str]:
     text = text.strip()
@@ -131,7 +121,8 @@ def chunk_for_tg(text: str, limit: int = 4000) -> List[str]:
             parts.append("".join(current).rstrip()); current, size = [block], len(block)
         else:
             current.append(block); size += len(block)
-    if current: parts.append("".join(current).rstrip())
+    if current:
+        parts.append("".join(current).rstrip())
     fixed: List[str] = []
     for p in parts:
         if len(p) <= limit:
@@ -142,10 +133,11 @@ def chunk_for_tg(text: str, limit: int = 4000) -> List[str]:
                 fixed.append("".join(buf).rstrip()); buf, tally = [ln], len(ln)
             else:
                 buf.append(ln); tally += len(ln)
-        if buf: fixed.append("".join(buf).rstrip())
+        if buf:
+            fixed.append("".join(buf).rstrip())
     return fixed
 
-def send_to_telegram(text: str, chat_id: str | None = None) -> List[requests.Response]:
+def send_to_telegram(text: str, chat_id: Optional[str] = None):
     if not TG_TOKEN:
         st.error("Не найден telegram.bot_token / TELEGRAM_BOT_TOKEN / BOT_TOKEN в secrets.")
         return []
@@ -162,6 +154,16 @@ def send_to_telegram(text: str, chat_id: str | None = None) -> List[requests.Res
             st.error(f"Telegram ошибка {r.status_code}: {r.text}")
             break
     return results
+
+def reset_to_home():
+    """Сброс состояния и возврат на главный экран."""
+    st.session_state.stage = "input"
+    st.session_state.initial_text = ""
+    st.session_state.questions = []
+    st.session_state.answers = {}
+    st.session_state.tz_markdown = ""
+    st.session_state.selected_dept = None
+    st.session_state.requester = ""
 
 # ===== Prompts =====
 SYSTEM_PROMPT = (
@@ -262,10 +264,12 @@ def generate_questions(initial_text: str) -> List[str]:
     ]
 
 # ===== Misc =====
-def build_header_meta(dept: str | None, requester: str | None) -> str:
+def build_header_meta(dept: Optional[str], requester: Optional[str]) -> str:
     meta = []
-    if dept: meta.append(f"Отдел: {dept}")
-    if requester: meta.append(f"Постановщик: {requester}")
+    if dept:
+        meta.append(f"Отдел: {dept}")
+    if requester:
+        meta.append(f"Постановщик: {requester}")
     return ("\n" + "\n".join(meta) + "\n\n") if meta else "\n"
 
 def build_fallback_tz(initial_text: str, questions: List[str], answers: Dict[int, str]) -> str:
@@ -295,7 +299,11 @@ def build_fallback_tz(initial_text: str, questions: List[str], answers: Dict[int
 if st.session_state.stage == "input":
     st.subheader("Шаг 1. Введите идею или черновик ТЗ")
     input_mode = st.radio("Формат ввода:", ["Идея (свободный текст)", "Черновик ТЗ"], index=0, horizontal=True)
-    placeholder = "Опишите проблему/цель, целевую аудиторию, желаемый результат, ограничения…" if input_mode.startswith("Идея") else "Вставьте черновик ТЗ — уточним детали и усилим структуру"
+    placeholder = (
+        "Опишите проблему/цель, целевую аудиторию, желаемый результат, ограничения…"
+        if input_mode.startswith("Идея")
+        else "Вставьте черновик ТЗ — уточним детали и усилим структуру"
+    )
     st.session_state.initial_text = st.text_area(placeholder, value=st.session_state.initial_text, height=220)
 
     col_a, col_b = st.columns([1, 1])
@@ -333,7 +341,9 @@ elif st.session_state.stage == "questions":
         with col1:
             if st.button("Сформировать ТЗ", type="primary", use_container_width=True):
                 with st.spinner("Собираем структурное ТЗ…"):
-                    answers_block = "\n\n".join([f"{i+1}. {st.session_state.questions[i]}\nОтвет: {st.session_state.answers.get(i, '').strip()}" for i in range(len(st.session_state.questions))])
+                    answers_block = "\n\n".join(
+                        [f"{i+1}. {st.session_state.questions[i]}\nОтвет: {st.session_state.answers.get(i, '').strip()}" for i in range(len(st.session_state.questions))]
+                    )
                     msg = [
                         {"role": "system", "content": SYSTEM_PROMPT},
                         {"role": "user", "content": f"""Изначальный текст (идея/черновик):
@@ -376,7 +386,6 @@ elif st.session_state.stage == "draft":
         st.session_state.selected_dept = st.selectbox("Куда отправить (отдел)", options=dept_names, index=0)
     else:
         st.session_state.selected_dept = None
-        st.caption("Маршрутизация по отделам не настроена — будет использован общий chat_id из secrets.")
 
     st.session_state.requester = st.text_input("Постановщик (ФИО, ник, контакт)", value=st.session_state.requester)
 
@@ -392,7 +401,9 @@ elif st.session_state.stage == "draft":
             with st.spinner("Отправляем в Telegram…"):
                 responses = send_to_telegram(final_text, chat_id=chat_id)
                 if responses and all(r.status_code == 200 for r in responses):
-                    st.success("Отправлено в Telegram ✅")
+                    st.toast("Отправлено в Telegram ✅", icon="✅")
+                    reset_to_home()
+                    st.rerun()
                 else:
                     st.warning("Часть сообщений могла не отправиться. Проверьте настройки и логи выше.")
     with c3:
