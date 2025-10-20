@@ -6,23 +6,20 @@ Streamlit: Генератор ТЗ из идей + отправка в Telegram
 Зависимости: streamlit, openai>=1.0.0,<3, requests
 Запуск:     streamlit run streamlit_tz_to_telegram_app.py
 
-Секреты (.streamlit/secrets.toml):
+Секреты (.streamlit/secrets.toml) — поддерживаются оба варианта:
+
+# ВАРИАНТ 1 (как у вас, в секции [telegram]):
+[telegram]
+TELEGRAM_BOT_TOKEN = "8427...:AAG..."
+TELEGRAM_CHAT_ID   = "489408957"
+
+# ВАРИАНТ 2 (в корне):
+TELEGRAM_BOT_TOKEN = "8427...:AAG..."
+TELEGRAM_CHAT_ID   = "489408957"
+
+# Плюс OpenAI:
 OPENAI_API_KEY = "sk-..."
 OPENAI_MODEL   = "gpt-4o-mini"
-
-# Любая из комбинаций ниже подойдёт
-TELEGRAM_BOT_TOKEN        = "123456:ABCDEF..."    # или BOT_TOKEN, или [telegram].bot_token
-TELEGRAM_CHAT_ID          = "-1001234567890"     # или TELEGRAM_DEFAULT_CHAT_ID, CHAT_ID,
-                                                  # или [telegram].default_chat_id / [telegram].chat_id
-
-[telegram]
-bot_token      = "123456:ABCDEF..."              # опционально (альтернатива TELEGRAM_BOT_TOKEN)
-default_chat_id = "-1001234567890"               # опционально (альтернатива TELEGRAM_CHAT_ID)
-
-  [telegram.departments]                          # опционально: маршрутизация по отделам
-  "Маркетинг" = "-1001111111111"
-  "Продажи"   = "-1002222222222"
-  "R&D"       = "-1003333333333"
 """
 
 from __future__ import annotations
@@ -33,7 +30,7 @@ from typing import List, Dict, Any
 import streamlit as st
 import requests
 
-# ===== OpenAI SDK (официальная библиотека v1+) =====
+# ===== OpenAI SDK (v1+) =====
 try:
     from openai import OpenAI
 except Exception:
@@ -48,25 +45,42 @@ st.caption("Вставьте идею или черновик ТЗ, ответь
 OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY")
 OPENAI_MODEL_DEFAULT = st.secrets.get("OPENAI_MODEL", "gpt-4o-mini")
 
-TELEGRAM_CONF = st.secrets.get("telegram", {})
-TG_TOKEN = (
-    TELEGRAM_CONF.get("bot_token")
-    or st.secrets.get("TELEGRAM_BOT_TOKEN")
-    or st.secrets.get("BOT_TOKEN")
-)
-TG_DEFAULT_CHAT = (
-    TELEGRAM_CONF.get("default_chat_id")
-    or TELEGRAM_CONF.get("chat_id")
-    or st.secrets.get("TELEGRAM_CHAT_ID")
-    or st.secrets.get("TELEGRAM_DEFAULT_CHAT_ID")
-    or st.secrets.get("CHAT_ID")
-)
-DEPT_MAP: Dict[str, str] = TELEGRAM_CONF.get("departments", {})
+TELEGRAM_CONF = st.secrets.get("telegram", {}) or {}
 
-# ===== Session state =====
+def _get_secret_any(*names: str) -> str | None:
+    """
+    Достаём значение по ИМЕНИ из:
+    1) корня secrets,
+    2) секции [telegram],
+    3) итерируем по ключам без учёта регистра.
+    """
+    # прямые попадания
+    for n in names:
+        v = st.secrets.get(n)
+        if v:
+            return v
+        if isinstance(TELEGRAM_CONF, dict) and TELEGRAM_CONF.get(n):
+            return TELEGRAM_CONF.get(n)
+
+    # case-insensitive
+    lowers_root = {k.lower(): v for k, v in dict(st.secrets).items() if not isinstance(v, dict)}
+    lowers_tg   = {k.lower(): v for k, v in dict(TELEGRAM_CONF).items()}
+    for n in names:
+        ln = n.lower()
+        if ln in lowers_root and lowers_root[ln]:
+            return lowers_root[ln]
+        if ln in lowers_tg and lowers_tg[ln]:
+            return lowers_tg[ln]
+    return None
+
+TG_TOKEN = _get_secret_any("bot_token", "TELEGRAM_BOT_TOKEN", "BOT_TOKEN")
+TG_DEFAULT_CHAT = _get_secret_any("default_chat_id", "chat_id", "TELEGRAM_CHAT_ID", "TELEGRAM_DEFAULT_CHAT_ID", "CHAT_ID")
+DEPT_MAP: Dict[str, str] = TELEGRAM_CONF.get("departments", {}) or {}
+
+# ===== Session =====
 if "_init" not in st.session_state:
     st.session_state._init = True
-    st.session_state.stage = "input"            # input -> questions -> draft
+    st.session_state.stage = "input"   # input -> questions -> draft
     st.session_state.initial_text = ""
     st.session_state.questions: List[str] = []
     st.session_state.answers: Dict[int, str] = {}
@@ -88,9 +102,9 @@ if OpenAI is None:
 def get_openai_client() -> OpenAI:
     return OpenAI(api_key=OPENAI_API_KEY)
 
-def call_chat_completion(messages: List[Dict[str, Any]], max_tokens: int = 2000, temperature: float = 0.2) -> str:
+def call_chat_completion(messages: List[Dict[str, Any]], max_tokens: int = 2000, temperature: float = TEMPERATURE) -> str:
     try:
-        client = get_openai_client()
+        client = get_openAI_client_cached()
         resp = client.chat.completions.create(
             model=model_name,
             messages=messages,
@@ -102,6 +116,10 @@ def call_chat_completion(messages: List[Dict[str, Any]], max_tokens: int = 2000,
         st.error(f"Ошибка OpenAI: {e}")
         return ""
 
+@st.cache_resource(show_spinner=False)
+def get_openAI_client_cached():
+    return get_openai_client()
+
 def chunk_for_tg(text: str, limit: int = 4000) -> List[str]:
     text = text.strip()
     if len(text) <= limit:
@@ -110,25 +128,21 @@ def chunk_for_tg(text: str, limit: int = 4000) -> List[str]:
     for para in text.split("\n\n"):
         block = para.strip() + "\n\n"
         if size + len(block) > limit and current:
-            parts.append("".join(current).rstrip())
-            current, size = [block], len(block)
+            parts.append("".join(current).rstrip()); current, size = [block], len(block)
         else:
             current.append(block); size += len(block)
-    if current:
-        parts.append("".join(current).rstrip())
+    if current: parts.append("".join(current).rstrip())
     fixed: List[str] = []
     for p in parts:
         if len(p) <= limit:
             fixed.append(p); continue
         buf, tally = [], 0
-        for line in p.splitlines(keepends=True):
-            if tally + len(line) > limit and buf:
-                fixed.append("".join(buf).rstrip())
-                buf, tally = [line], len(line)
+        for ln in p.splitlines(keepends=True):
+            if tally + len(ln) > limit and buf:
+                fixed.append("".join(buf).rstrip()); buf, tally = [ln], len(ln)
             else:
-                buf.append(line); tally += len(line)
-        if buf:
-            fixed.append("".join(buf).rstrip())
+                buf.append(ln); tally += len(ln)
+        if buf: fixed.append("".join(buf).rstrip())
     return fixed
 
 def send_to_telegram(text: str, chat_id: str | None = None) -> List[requests.Response]:
@@ -149,7 +163,7 @@ def send_to_telegram(text: str, chat_id: str | None = None) -> List[requests.Res
             break
     return results
 
-# ===== Prompt builders =====
+# ===== Prompts =====
 SYSTEM_PROMPT = (
     "Вы — опытный продакт-менеджер и промпт-инженер. Работаете по-русски, кратко и структурно. "
     "Если пользователь дал только идею — сначала задайте релевантные уточняющие вопросы (5–10, не банальные). "
@@ -177,8 +191,9 @@ TZ_INSTRUCTION = (
     "Пиши по-русски, делай разделы информативными и прикладными."
 )
 
+# ===== Parsers =====
 def parse_numbered_questions(text_block: str) -> List[str]:
-    """Извлекаем '1. вопрос' / '- вопрос'."""
+    """Извлекаем '1. вопрос' и '- вопрос'."""
     lines = text_block.splitlines()
     questions: List[str] = []
     for s in (ln.strip() for ln in lines):
@@ -195,7 +210,7 @@ def parse_numbered_questions(text_block: str) -> List[str]:
             q = m2.group(1).strip().rstrip("?。．！!；;：:")
             if q:
                 questions.append(q + "?")
-    if not questions:  # фолбэк: превращаем строки в вопросы
+    if not questions:  # превратим строки в вопросы
         for s in (ln.strip() for ln in lines if ln.strip()):
             questions.append(s.rstrip("?") + "?")
     return questions[:10]
@@ -209,16 +224,16 @@ def parse_json_questions(text_block: str) -> List[str]:
         pass
     return []
 
+# ===== Question generation =====
 def generate_questions(initial_text: str) -> List[str]:
-    """Стойкая генерация вопросов: список → JSON → фолбэк."""
-    user_content_1 = f"""Текст:
+    """Стойкая генерация: список → JSON → фолбэк."""
+    msg1 = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": f"""Текст:
 
 {initial_text}
 
-{QUESTIONS_INSTRUCTION}"""
-    msg1 = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": user_content_1},
+{QUESTIONS_INSTRUCTION}"""},
     ]
     raw1 = call_chat_completion(msg1, temperature=TEMPERATURE)
     qs = parse_numbered_questions(raw1) if raw1 else []
@@ -246,12 +261,11 @@ def generate_questions(initial_text: str) -> List[str]:
         "Какие юридические/безопасностные требования?",
     ]
 
+# ===== Misc =====
 def build_header_meta(dept: str | None, requester: str | None) -> str:
     meta = []
-    if dept:
-        meta.append(f"Отдел: {dept}")
-    if requester:
-        meta.append(f"Постановщик: {requester}")
+    if dept: meta.append(f"Отдел: {dept}")
+    if requester: meta.append(f"Постановщик: {requester}")
     return ("\n" + "\n".join(meta) + "\n\n") if meta else "\n"
 
 def build_fallback_tz(initial_text: str, questions: List[str], answers: Dict[int, str]) -> str:
