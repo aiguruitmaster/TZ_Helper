@@ -272,7 +272,7 @@ def parse_json_questions(text_block: str) -> List[str]:
 def generate_questions(initial_text: str) -> List[str]:
     """Стойкая генерация вопросов: список -> JSON -> фолбэк."""
     # Попытка 1 — обычный формат (нумерованный список)
-    user_content_1 = "Текст:
+    user_content_1 = f""Текст:
 
 " + str(initial_text) + "
 
