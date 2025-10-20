@@ -1,5 +1,34 @@
 # -*- coding: utf-8 -*-
+"""
+Streamlit: Генератор ТЗ из идей + отправка в Telegram
 
+Особенности:
+- Пользователь вводит Идею или Черновик ТЗ → модель задаёт уточняющие вопросы → формируется ТЗ.
+- Предпросмотр ТЗ, ручное редактирование, выбор отдела и постановщика.
+- Отправка результата в Telegram ботом (Bot API).
+- Ключи и настройки берём из st.secrets (см. подсказки ниже).
+
+Требуемые зависимости: streamlit, openai>=1.0.0, requests
+Запуск: streamlit run streamlit_tz_to_telegram_app.py
+
+Пример структуры .streamlit/secrets.toml:
+
+OPENAI_API_KEY = "sk-..."
+OPENAI_MODEL = "gpt-4o-mini"  # опционально, будет дефолт если не задано
+
+[telegram]
+bot_token = "123456:ABCDEF..."
+# Если хотите маршрутизацию по отделам — укажите ID чатов ниже (channel/group/supergroup):
+# Получить chat_id можно добавив бота в чат и вызвав https://api.telegram.org/bot<token>/getUpdates
+# либо любой известный вам ID канала/группы.
+default_chat_id = "-1001234567890"
+
+  [telegram.departments]
+  "Маркетинг" = "-1001111111111"
+  "Продажи"   = "-1002222222222"
+  "R&D"       = "-1003333333333"
+
+"""
 
 from __future__ import annotations
 import os
@@ -20,7 +49,7 @@ except Exception as e:  # pragma: no cover
 # ---------------------------- UI CONFIG ----------------------------
 st.set_page_config(page_title="Генератор ТЗ → Telegram", page_icon="📝", layout="centered")
 
-st.title("📝 Генератор ТЗ для промпт‑инженера")
+st.title("📝 Генератор ТЗ для промпт‑инженера → Telegram")
 st.caption("Вставьте идею или черновик ТЗ, ответьте на уточняющие вопросы, утвердите и отправьте в нужный отдел в Telegram.")
 
 # ---------------------------- Secrets / Settings ----------------------------
@@ -217,6 +246,64 @@ def build_header_meta(dept: str | None, requester: str | None) -> str:
         return "\n" + "\n".join(meta) + "\n\n"
     return "\n"
 
+# Доп. устойчивые генераторы вопросов
+
+def parse_json_questions(text_block: str) -> List[str]:
+    try:
+        data = json.loads(text_block)
+        if isinstance(data, dict) and isinstance(data.get("questions"), list):
+            items = [str(x).strip().rstrip("?") + "?" for x in data["questions"] if str(x).strip()]
+            return items[:10]
+    except Exception:
+        pass
+    return []
+
+
+def generate_questions(initial_text: str) -> List[str]:
+    # Попытка 1 — обычный формат (нумерованный список)
+    msg1 = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": f"Текст:
+
+{initial_text}
+
+{QUESTIONS_INSTRUCTION}"},
+    ]
+    raw1 = call_chat_completion(msg1, temperature=TEMPERATURE)
+    if raw1:
+        qs = parse_numbered_questions(raw1)
+        if qs:
+            return qs
+
+    # Попытка 2 — JSON
+    msg2 = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": (
+            "Сформируй 7 уточняющих вопросов в JSON без лишнего текста: "
+            "{\\"questions\\":[\\"вопрос1\\",\\"вопрос2\\",...]} по следующему тексту:
+
+" + initial_text
+        )},
+    ]
+    raw2 = call_chat_completion(msg2, temperature=TEMPERATURE)
+    if raw2:
+        qs = parse_json_questions(raw2)
+        if qs:
+            return qs
+
+    # Фолбэк
+    return [
+        "Какова основная цель и целевая метрика?",
+        "Кто целевая аудитория/персоны и их ключевые задачи?",
+        "Какие входные данные/поля должен предоставить пользователь?",
+        "Какие ограничения по стилю, тону, длине и языку ответа?",
+        "Какие риски/нежелательные ответы нужно исключить?",
+        "Есть ли примеры желаемого результата (few-shot)?",
+        "Где и как это будет встроено (канал/интеграция)?",
+        "Какие требования к логированию и метрикам качества?",
+        "Какие юридические/безопасностные требования?",
+    ]
+
 # ---------------------------- Stage: Input ----------------------------
 if st.session_state.stage == "input":
     st.subheader("Шаг 1. Введите идею или черновик ТЗ")
@@ -241,15 +328,14 @@ if st.session_state.stage == "input":
     with col_a:
         if st.button("Сгенерировать вопросы", type="primary", use_container_width=True, disabled=not bool(st.session_state.initial_text.strip())):
             with st.spinner("Генерируем уточняющие вопросы…"):
-                msg = [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": f"Текст:\n\n{st.session_state.initial_text}\n\n{QUESTIONS_INSTRUCTION}"},
-                ]
-                raw = call_chat_completion(msg, temperature=TEMPERATURE)
-                st.session_state.questions = parse_numbered_questions(raw)
-                st.session_state.answers = {i: "" for i in range(len(st.session_state.questions))}
-                st.session_state.stage = "questions"
-                st.rerun()
+                qs = generate_questions(st.session_state.initial_text)
+                if not qs:
+                    st.error("Не удалось получить вопросы от модели. Попробуйте ещё раз.")
+                else:
+                    st.session_state.questions = qs
+                    st.session_state.answers = {i: "" for i in range(len(qs))}
+                    st.session_state.stage = "questions"
+                    st.rerun()
     with col_b:
         st.button("Очистить", use_container_width=True, on_click=lambda: st.session_state.update(initial_text=""))
 
@@ -257,22 +343,39 @@ if st.session_state.stage == "input":
 elif st.session_state.stage == "questions":
     st.subheader("Шаг 2. Ответьте на вопросы")
     if not st.session_state.questions:
-        st.warning("Сначала вернитесь и введите идею/черновик.")
+        st.warning("Сначала вернитесь и введите идею/черновик. Или попробуйте заново сгенерировать вопросы.")
+        if st.button("Сгенерировать вопросы ещё раз"):
+            with st.spinner("Генерируем уточняющие вопросы…"):
+                qs = generate_questions(st.session_state.initial_text)
+                st.session_state.questions = qs
+                st.session_state.answers = {i: "" for i in range(len(qs))}
+                st.rerun()
     else:
         for i, q in enumerate(st.session_state.questions, start=1):
             st.session_state.answers[i - 1] = st.text_area(f"{i}. {q}", value=st.session_state.answers.get(i - 1, ""), height=100)
 
-        col1, col2 = st.columns([1, 1])
+        col1, col2, col3 = st.columns([1, 1, 1])
         with col1:
             if st.button("Сформировать ТЗ", type="primary", use_container_width=True):
                 with st.spinner("Собираем структурное ТЗ…"):
                     # Собираем блок с ответами
-                    answers_block = "\n\n".join([f"{i+1}. {st.session_state.questions[i]}\nОтвет: {st.session_state.answers.get(i, '').strip()}" for i in range(len(st.session_state.questions))])
+                    answers_block = "
+
+".join([f"{i+1}. {st.session_state.questions[i]}
+Ответ: {st.session_state.answers.get(i, '').strip()}" for i in range(len(st.session_state.questions))])
                     msg = [
                         {"role": "system", "content": SYSTEM_PROMPT},
                         {"role": "user", "content": (
-                            f"Изначальный текст (идея/черновик):\n\n{st.session_state.initial_text}\n\n"
-                            f"Ответы на уточняющие вопросы:\n\n{answers_block}\n\n{TZ_INSTRUCTION}"
+                            f"Изначальный текст (идея/черновик):
+
+{st.session_state.initial_text}
+
+"
+                            f"Ответы на уточняющие вопросы:
+
+{answers_block}
+
+{TZ_INSTRUCTION}"
                         )},
                     ]
                     tz_md = call_chat_completion(msg, temperature=TEMPERATURE)
@@ -280,6 +383,13 @@ elif st.session_state.stage == "questions":
                     st.session_state.stage = "draft"
                     st.rerun()
         with col2:
+            if st.button("Перегенерировать вопросы", use_container_width=True):
+                with st.spinner("Генерируем уточняющие вопросы…"):
+                    qs = generate_questions(st.session_state.initial_text)
+                    st.session_state.questions = qs
+                    st.session_state.answers = {i: "" for i in range(len(qs))}
+                    st.rerun()
+        with col3:
             if st.button("Назад", use_container_width=True):
                 st.session_state.stage = "input"
                 st.rerun()
