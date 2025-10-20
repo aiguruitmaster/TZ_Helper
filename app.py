@@ -262,11 +262,7 @@ def parse_json_questions(text_block: str) -> List[str]:
 def generate_questions(initial_text: str) -> List[str]:
     """Стойкая генерация вопросов: список -> JSON -> фолбэк."""
     # Попытка 1 — обычный формат (нумерованный список)
-    user_content_1 = "Текст:
-
-{}
-
-{}".format(initial_text, QUESTIONS_INSTRUCTION)
+    user_content_1 = "Текст:\n\n" + str(initial_text) + "\n\n" + QUESTIONS_INSTRUCTION
     msg1 = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": user_content_1},
@@ -282,9 +278,7 @@ def generate_questions(initial_text: str) -> List[str]:
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": (
             "Сформируй 7 уточняющих вопросов в JSON без лишнего текста: "
-            "{\\"questions\\":[\\"вопрос1\\",\\"вопрос2\\",...]} по следующему тексту:
-
-" + initial_text
+            "{\\\"questions\\\":[\\\"вопрос1\\\",\\\"вопрос2\\\",...]} по следующему тексту:\n\n" + str(initial_text)
         )},
     ]
     raw2 = call_chat_completion(msg2, temperature=TEMPERATURE)
@@ -361,20 +355,11 @@ elif st.session_state.stage == "questions":
             if st.button("Сформировать ТЗ", type="primary", use_container_width=True):
                 with st.spinner("Собираем структурное ТЗ…"):
                     # Собираем блок с ответами
-                    answers_block = "
-
-".join([f"{i+1}. {st.session_state.questions[i]}
-Ответ: {st.session_state.answers.get(i, '').strip()}" for i in range(len(st.session_state.questions))])
-                    user_content_tz = ("Изначальный текст (идея/черновик):
-
-{}
-
-"
-                                        "Ответы на уточняющие вопросы:
-
-{}
-
-{}" ).format(st.session_state.initial_text, answers_block, TZ_INSTRUCTION)
+                    answers_block = "\n\n".join([f"{i+1}. {st.session_state.questions[i]}\nОтвет: {st.session_state.answers.get(i, '').strip()}" for i in range(len(st.session_state.questions))])
+                    user_content_tz = (
+                        "Изначальный текст (идея/черновик):\n\n" + str(st.session_state.initial_text) + "\n\n"
+                        + "Ответы на уточняющие вопросы:\n\n" + answers_block + "\n\n" + TZ_INSTRUCTION
+                    )
                     msg = [
                         {"role": "system", "content": SYSTEM_PROMPT},
                         {"role": "user", "content": user_content_tz},
