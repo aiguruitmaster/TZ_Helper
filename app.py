@@ -14,7 +14,7 @@ OPENAI_MODEL        = "gpt-4o-mini"
 TELEGRAM_BOT_TOKEN  = "8427...:AAG..."
 TELEGRAM_CHAT_ID    = "489408957"
 
-# ВАРИАНТ 2 (в секции [telegram]; как на вашем скриншоте):
+# ВАРИАНТ 2 (в секции [telegram]):
 [telegram]
 TELEGRAM_BOT_TOKEN  = "8427...:AAG..."
 TELEGRAM_CHAT_ID    = "489408957"
@@ -90,12 +90,35 @@ TEMPERATURE = 0.2
 if not OPENAI_API_KEY:
     st.error("Не найден OPENAI_API_KEY в secrets.")
 if OpenAI is None:
-    st.error("Пакет openai не установлен. Установите:  pip install openai")
+    st.error("Пакет openai не установлен. Установите:  pip install -U openai")
 
 # ===== OpenAI helpers =====
 @st.cache_resource(show_spinner=False)
 def _openai_client():
     return OpenAI(api_key=OPENAI_API_KEY)
+
+def _is_o_or_reasoning(name: str) -> bool:
+    """Грубая эвристика: o*/gpt-4o* семейство требует max_completion_tokens в Chat Completions,
+    а в Responses API — max_output_tokens."""
+    name = (name or "").lower().strip()
+    return bool(
+        name.startswith("gpt-4o") or
+        name.startswith("o1") or
+        name.startswith("o3") or
+        name.startswith("o4") or
+        name.startswith("o-") or
+        name.startswith("o_")
+    )
+
+def _messages_to_responses_input(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Преобразуем chat messages → формат Responses API (input with typed content)."""
+    out: List[Dict[str, Any]] = []
+    for m in messages:
+        out.append({
+            "role": m.get("role", "user"),
+            "content": [{"type": "input_text", "text": str(m.get("content", ""))}],
+        })
+    return out
 
 def call_chat_completion(
     messages: List[Dict[str, Any]],
@@ -103,29 +126,78 @@ def call_chat_completion(
     max_new_tokens: int = 1200,
 ) -> str:
     """
-    Некоторые модели не принимают `max_tokens` (требуют `max_completion_tokens` или `max_output_tokens`).
-    Делаем последовательные попытки и возвращаем контент при первом успехе.
+    Унифицированный вызов LLM:
+    1) Для o/4o семейств сначала пробуем Chat Completions с max_completion_tokens,
+       затем — Responses API с max_output_tokens.
+    2) Для прочих — Chat Completions с max_tokens.
+    3) В любом случае есть безопасные фолбэки.
     """
     client = _openai_client()
     last_err: Optional[Exception] = None
-    for extra in (
-        {"max_completion_tokens": max_new_tokens},
-        {"max_output_tokens": max_new_tokens},
-        {"max_tokens": max_new_tokens},
-        {},  # на крайний — без лимита
-    ):
+    is_o = _is_o_or_reasoning(model_name)
+
+    # --- Путь A: o/4o семействo (макс. совместимость) ---
+    if is_o:
+        # 1) Chat Completions с max_completion_tokens
         try:
             resp = client.chat.completions.create(
                 model=model_name,
                 messages=messages,
                 temperature=temperature,
-                **extra,
+                max_completion_tokens=max_new_tokens,
             )
-            content = resp.choices[0].message.content or ""
-            return content.strip()
-        except Exception as e:
-            last_err = e
-            continue
+            return (resp.choices[0].message.content or "").strip()
+        except Exception as e1:
+            last_err = e1
+            # 2) Responses API с max_output_tokens
+            try:
+                resp = client.responses.create(
+                    model=model_name,
+                    input=_messages_to_responses_input(messages),
+                    temperature=temperature,
+                    max_output_tokens=max_new_tokens,
+                )
+                # в responses есть удобное поле output_text
+                text = getattr(resp, "output_text", None)
+                if not text:
+                    # на всякий случай извлечём текст из первого item
+                    try:
+                        text = resp.output[0].content[0].text
+                    except Exception:
+                        text = ""
+                return (text or "").strip()
+            except Exception as e2:
+                last_err = e2
+                # 3) как крайний фолбэк — Chat Completions без лимита
+                try:
+                    resp = client.chat.completions.create(
+                        model=model_name, messages=messages, temperature=temperature
+                    )
+                    return (resp.choices[0].message.content or "").strip()
+                except Exception as e3:
+                    last_err = e3
+
+    # --- Путь B: классические модели (max_tokens) ---
+    else:
+        try:
+            resp = client.chat.completions.create(
+                model=model_name,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_new_tokens,
+            )
+            return (resp.choices[0].message.content or "").strip()
+        except Exception as e1:
+            last_err = e1
+            # фолбэк: без лимита
+            try:
+                resp = client.chat.completions.create(
+                    model=model_name, messages=messages, temperature=temperature
+                )
+                return (resp.choices[0].message.content or "").strip()
+            except Exception as e2:
+                last_err = e2
+
     if last_err:
         st.error(f"Ошибка OpenAI: {last_err}")
     return ""
@@ -208,13 +280,13 @@ TZ_INSTRUCTION = (
     "## Контекст и ограничения\nКаналы, пользователи, языки, приватность/безопасность, юридические ограничения.\n\n"
     "## Пользовательские сценарии\nБуллет-список типичных сценариев (3–6).\n\n"
     "## Входные данные\nЧто получает модель (поля формы, файлы, контекст, системные инструкции).\n\n"
-    "## Выход/результат\nФормат ответа модели, стиль, структура, требования к длине.\n\n"
+    "## Выход/результат\nФормат ответа модели, стиль, структура, требования к длине.\н\n"
     "## Критерии качества и приёмки\nЧёткие проверяемые критерии (bullet list).\n\n"
     "## Ограничения генерации\nЗапрещённые темы/стили, тональность, правила безопасности.\n\n"
     "## Технические детали промпта\nСистемное сообщение, переменные, few-shot (если нужны), temperature/top_p, длина контекста.\n\n"
-    "## Телеметрия и логирование\nЧто логируем, как измеряем качество.\n\n"
-    "## Риски и допущения\nОсновные риски и способы их снижения.\n\n"
-    "## Чек-лист готовности\nКороткий список из 5–8 пунктов.\n\n"
+    "## Телеметрия и логирование\nЧто логируем, как измеряем качество.\н\n"
+    "## Риски и допущения\nОсновные риски и способы их снижения.\н\n"
+    "## Чек-лист готовности\nКороткий список из 5–8 пунктов.\н\n"
     "Пиши по-русски, делай разделы информативными и прикладными."
 )
 
@@ -267,7 +339,7 @@ def generate_questions(initial_text: str) -> List[str]:
     if qs:
         return qs
 
-    # Вторая попытка — строго JSON без пояснений (без f-строк, чтобы не экранировать скобки)
+    # Вторая попытка — строго JSON без пояснений
     json_prompt = (
         'Сформируй 7 уточняющих вопросов строго в JSON без пояснений, '
         'формат: {"questions":["вопрос1","вопрос2","..."]}. Текст:\n\n' + str(initial_text)
