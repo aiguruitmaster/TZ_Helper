@@ -1,7 +1,7 @@
 # streamlit_tz_to_telegram_app.py
 # -*- coding: utf-8 -*-
 """
-Streamlit: Генератор ТЗ из идей + отправка в Telegram
+Streamlit: Генератор ТЗ из идей → структурное ТЗ → отправка в Telegram
 
 Зависимости: streamlit, openai>=1.0.0,<3, requests
 Запуск:     streamlit run streamlit_tz_to_telegram_app.py
@@ -49,14 +49,14 @@ TELEGRAM_CONF = st.secrets.get("telegram", {}) or {}
 
 def _get_secret_any(*names: str) -> Optional[str]:
     """Ищем ключи и в корне secrets, и в секции [telegram], без учёта регистра."""
-    # прямое совпадение
+    # 1) прямое совпадение
     for n in names:
         v = st.secrets.get(n)
         if v:
             return str(v)
         if isinstance(TELEGRAM_CONF, dict) and TELEGRAM_CONF.get(n):
             return str(TELEGRAM_CONF.get(n))
-    # case-insensitive
+    # 2) case-insensitive
     root_lower = {k.lower(): v for k, v in dict(st.secrets).items() if not isinstance(v, dict)}
     tg_lower   = {k.lower(): v for k, v in dict(TELEGRAM_CONF).items()}
     for n in names:
@@ -92,33 +92,57 @@ if not OPENAI_API_KEY:
 if OpenAI is None:
     st.error("Пакет openai не установлен. Установите:  pip install openai")
 
-# ===== Helpers =====
+# ===== OpenAI helpers =====
 @st.cache_resource(show_spinner=False)
 def _openai_client():
     return OpenAI(api_key=OPENAI_API_KEY)
 
-def call_chat_completion(messages: List[Dict[str, Any]], max_tokens: int = 2000, temperature: float = TEMPERATURE) -> str:
-    try:
-        resp = _openai_client().chat.completions.create(
-            model=model_name,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
-        return (resp.choices[0].message.content or "").strip()
-    except Exception as e:
-        st.error(f"Ошибка OpenAI: {e}")
-        return ""
+def call_chat_completion(
+    messages: List[Dict[str, Any]],
+    temperature: float = TEMPERATURE,
+    max_new_tokens: int = 1200,
+) -> str:
+    """
+    Некоторые модели не принимают `max_tokens` (требуют `max_completion_tokens` или `max_output_tokens`).
+    Делаем последовательные попытки и возвращаем контент при первом успехе.
+    """
+    client = _openai_client()
+    last_err: Optional[Exception] = None
+    for extra in (
+        {"max_completion_tokens": max_new_tokens},
+        {"max_output_tokens": max_new_tokens},
+        {"max_tokens": max_new_tokens},
+        {},  # на крайний — без лимита
+    ):
+        try:
+            resp = client.chat.completions.create(
+                model=model_name,
+                messages=messages,
+                temperature=temperature,
+                **extra,
+            )
+            content = resp.choices[0].message.content or ""
+            return content.strip()
+        except Exception as e:
+            last_err = e
+            continue
+    if last_err:
+        st.error(f"Ошибка OpenAI: {last_err}")
+    return ""
 
+# ===== Telegram helpers =====
 def chunk_for_tg(text: str, limit: int = 4000) -> List[str]:
     text = text.strip()
     if len(text) <= limit:
         return [text]
-    parts, current, size = [], [], 0
+    parts: List[str] = []
+    current: List[str] = []
+    size = 0
     for para in text.split("\n\n"):
         block = para.strip() + "\n\n"
         if size + len(block) > limit and current:
-            parts.append("".join(current).rstrip()); current, size = [block], len(block)
+            parts.append("".join(current).rstrip())
+            current, size = [block], len(block)
         else:
             current.append(block); size += len(block)
     if current:
@@ -127,7 +151,8 @@ def chunk_for_tg(text: str, limit: int = 4000) -> List[str]:
     for p in parts:
         if len(p) <= limit:
             fixed.append(p); continue
-        buf, tally = [], 0
+        buf: List[str] = []
+        tally = 0
         for ln in p.splitlines(keepends=True):
             if tally + len(ln) > limit and buf:
                 fixed.append("".join(buf).rstrip()); buf, tally = [ln], len(ln)
@@ -242,15 +267,21 @@ def generate_questions(initial_text: str) -> List[str]:
     if qs:
         return qs
 
+    # Вторая попытка — строго JSON без пояснений (без f-строк, чтобы не экранировать скобки)
+    json_prompt = (
+        'Сформируй 7 уточняющих вопросов строго в JSON без пояснений, '
+        'формат: {"questions":["вопрос1","вопрос2","..."]}. Текст:\n\n' + str(initial_text)
+    )
     msg2 = [
         {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": "Сформируй 7 уточняющих вопросов строго в JSON без пояснений, формат: {\"questions\":[\"вопрос1\",\"вопрос2\",...]}. Текст:\n\n" + str(initial_text)},
+        {"role": "user", "content": json_prompt},
     ]
     raw2 = call_chat_completion(msg2, temperature=TEMPERATURE)
     qs = parse_json_questions(raw2) if raw2 else []
     if qs:
         return qs
 
+    # Фолбэк-вопросы
     return [
         "Какова основная цель и целевая метрика?",
         "Кто целевая аудитория/персоны и их ключевые задачи?",
@@ -263,7 +294,7 @@ def generate_questions(initial_text: str) -> List[str]:
         "Какие юридические/безопасностные требования?",
     ]
 
-# ===== Misc =====
+# ===== Misc builders =====
 def build_header_meta(dept: Optional[str], requester: Optional[str]) -> str:
     meta = []
     if dept:
@@ -295,7 +326,8 @@ def build_fallback_tz(initial_text: str, questions: List[str], answers: Dict[int
     ]
     return "".join(md)
 
-# ===== Stage: Input =====
+# ===================== STAGES =====================
+# ----- Stage: Input -----
 if st.session_state.stage == "input":
     st.subheader("Шаг 1. Введите идею или черновик ТЗ")
     input_mode = st.radio("Формат ввода:", ["Идея (свободный текст)", "Черновик ТЗ"], index=0, horizontal=True)
@@ -322,7 +354,7 @@ if st.session_state.stage == "input":
         if st.button("Очистить", use_container_width=True):
             st.session_state.initial_text = ""
 
-# ===== Stage: Questions =====
+# ----- Stage: Questions -----
 elif st.session_state.stage == "questions":
     st.subheader("Шаг 2. Ответьте на вопросы")
     if not st.session_state.questions:
@@ -375,7 +407,7 @@ elif st.session_state.stage == "questions":
                 st.session_state.stage = "input"
                 st.rerun()
 
-# ===== Stage: Draft / Preview =====
+# ----- Stage: Draft / Preview -----
 elif st.session_state.stage == "draft":
     st.subheader("Шаг 3. Предпросмотр ТЗ")
     st.info("Вы можете подредактировать ТЗ перед отправкой.")
