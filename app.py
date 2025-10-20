@@ -37,8 +37,8 @@ except Exception:
     OpenAI = None  # покажем ошибку ниже
 
 # ===== UI =====
-st.set_page_config(page_title="Генератор ТЗ → Telegram", page_icon="📝", layout="centered")
-st.title("📝 Генератор ТЗ для промпт-инженера → Telegram")
+st.set_page_config(page_title="Генератор ТЗ ", page_icon="📝", layout="centered")
+st.title("📝 Генератор ТЗ для промпт-инженера ")
 st.caption("Вставьте идею или черновик ТЗ, ответьте на уточняющие вопросы, утвердите и отправьте в нужный отдел в Telegram.")
 
 # ===== Secrets / Settings =====
@@ -492,21 +492,21 @@ elif st.session_state.stage == "draft":
     else:
         st.session_state.selected_dept = None
 
-    st.session_state.requester = st.text_input("Постановщик (ФИО, ник, контакт)", value=st.session_state.requester)
+    st.session_state.requester = st.text_input("Постановщик (ФИО, ник, контакт,отдел)", value=st.session_state.requester)
 
     c1, c2, c3 = st.columns([1, 1, 1])
     with c1:
         st.download_button("Скачать .md", data=st.session_state.tz_markdown.encode("utf-8"), file_name="tz_prompt.md", mime="text/markdown")
     with c2:
-        if st.button("Отправить в Telegram", type="primary", use_container_width=True):
+        if st.button("Отправить", type="primary", use_container_width=True):
             dept = st.session_state.selected_dept
             chat_id = DEPT_MAP.get(dept) if dept else None
             header = "ТЗ для промпт-инженера\n" + ("=" * 24) + build_header_meta(dept, st.session_state.requester)
             final_text = header + st.session_state.tz_markdown
-            with st.spinner("Отправляем в Telegram…"):
+            with st.spinner("Отправляем…"):
                 responses = send_to_telegram(final_text, chat_id=chat_id)
                 if responses and all(r.status_code == 200 for r in responses):
-                    st.toast("Отправлено в Telegram ✅", icon="✅")
+                    st.toast("Отправлено ✅", icon="✅")
                     reset_to_home()
                     st.rerun()
                 else:
