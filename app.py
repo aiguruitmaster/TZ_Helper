@@ -98,17 +98,18 @@ def _openai_client():
     return OpenAI(api_key=OPENAI_API_KEY)
 
 def _is_o_or_reasoning(name: str) -> bool:
-    """Грубая эвристика: o*/gpt-4o* семейство требует max_completion_tokens в Chat Completions,
-    а в Responses API — max_output_tokens."""
-    name = (name or "").lower().strip()
-    return bool(
-        name.startswith("gpt-4o") or
-        name.startswith("o1") or
-        name.startswith("o3") or
-        name.startswith("o4") or
-        name.startswith("o-") or
-        name.startswith("o_")
-    )
+    """
+    Модели нового семейства (gpt-4o*, gpt-4.1*, o1/o3/o4 и т.п.) —
+    для них в Chat Completions нужен max_completion_tokens,
+    а в Responses API — max_output_tokens.
+    """
+    n = (name or "").lower().strip()
+    return n.startswith((
+        "gpt-4o",      # 4o / 4o-mini
+        "gpt-4.1",     # 4.1 / 4.1-mini  ← ДОБАВЛЕНО
+        "o1", "o3", "o4", "o-", "o_"
+    ))
+
 
 def _messages_to_responses_input(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Преобразуем chat messages → формат Responses API (input with typed content)."""
